@@ -27,7 +27,12 @@ require_once __DIR__ . '/autoload.php';
 add_action('init', [\Gratis\Reviews\Reviews::class, 'register']);
 add_shortcode('gratis-rating', [\Gratis\Reviews\Reviews::class, 'ratingShortcode']);
 add_shortcode('gratis-testimonials', [\Gratis\Reviews\Reviews::class, 'testimonialsShortcode']);
+add_shortcode('gratis-aggregate-rating', [\Gratis\Reviews\Reviews::class, 'aggregateRatingShortcode']);
+add_shortcode('gratis-review-form', [\Gratis\Reviews\Reviews::class, 'reviewFormShortcode']);
 add_action('wp_head', [\Gratis\Reviews\Reviews::class, 'schemaMarkup']);
+
+add_action('admin_post_nopriv_gratis_review_submit', [\Gratis\Reviews\Reviews::class, 'handleFormSubmission']);
+add_action('admin_post_gratis_review_submit', [\Gratis\Reviews\Reviews::class, 'handleFormSubmission']);
 
 add_action('add_meta_boxes', [\Gratis\Reviews\MetaBox::class, 'register']);
 add_action('save_post_gratis_testimonial', [\Gratis\Reviews\MetaBox::class, 'save'], 10, 2);

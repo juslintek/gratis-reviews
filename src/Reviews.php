@@ -152,4 +152,270 @@ final class Reviews {
             . wp_json_encode($schema, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
             . '</script>' . "\n";
     }
+
+    /**
+     * Compute aggregate stats over published testimonials carrying a 1-5 `_rating`.
+     *
+     * @return array{count:int,average:float} Review count and mean rating (0.0 when none).
+     */
+    private static function aggregateRatingStats(): array {
+        // ponytail: O(n) scan over published testimonials per call. For very large
+        // volumes, cache in a transient invalidated on save/transition/delete. Fine
+        // for typical testimonial counts. get_posts() primes the meta cache so the
+        // per-post _rating reads below do not each hit the database.
+        // phpcs:ignore WordPress.WP.PostsPerPage.posts_per_page_numberposts -- aggregate needs every published rating.
+        $testimonials = get_posts([
+            'post_type'   => self::POST_TYPE,
+            'numberposts' => -1,
+            'post_status' => 'publish',
+        ]);
+
+        $sum   = 0;
+        $count = 0;
+        foreach ($testimonials as $t) {
+            $rating = (int) get_post_meta($t->ID, '_rating', true);
+            if ($rating >= 1 && $rating <= 5) {
+                $sum += $rating;
+                ++$count;
+            }
+        }
+
+        return [
+            'count'   => $count,
+            'average' => $count > 0 ? $sum / $count : 0.0,
+        ];
+    }
+
+    /**
+     * Build the AggregateRating schema array, or null when there are no ratings.
+     *
+     * Block-free helper reusable by themes. The reviewed item defaults to an
+     * Organization named after the site; both the type and name are filterable,
+     * as is the final schema array.
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function aggregateRatingData(): ?array {
+        $stats = self::aggregateRatingStats();
+        if ($stats['count'] < 1) {
+            return null;
+        }
+
+        /** Filter the schema type of the reviewed item (e.g. Organization, Thing, Product). */
+        $item_type = (string) apply_filters('gratis_reviews_aggregate_item_type', 'Organization');
+        /** Filter the name of the reviewed item (defaults to the site name). */
+        $item_name = (string) apply_filters('gratis_reviews_aggregate_item_name', get_bloginfo('name'));
+
+        $schema = [
+            '@context'     => 'https://schema.org',
+            '@type'        => 'AggregateRating',
+            'itemReviewed' => [
+                '@type' => '' !== $item_type ? $item_type : 'Organization',
+                'name'  => $item_name,
+            ],
+            'ratingValue'  => round($stats['average'], 1),
+            'reviewCount'  => $stats['count'],
+            'bestRating'   => 5,
+            'worstRating'  => 1,
+        ];
+
+        /** Filter the complete AggregateRating schema before output. */
+        return (array) apply_filters('gratis_reviews_aggregate_schema', $schema, $stats);
+    }
+
+    /**
+     * `[gratis-aggregate-rating schema="yes" text="yes"]` — visible summary + JSON-LD.
+     *
+     * Emits a valid schema.org AggregateRating (gated by the global schema setting)
+     * alongside an optional human-readable "X out of 5 based on N reviews" line.
+     *
+     * @param array<string,mixed>|string $atts Shortcode attributes.
+     */
+    public static function aggregateRatingShortcode($atts): string {
+        $atts        = shortcode_atts(['schema' => 'yes', 'text' => 'yes'], $atts);
+        $show_schema = 'no' !== strtolower((string) $atts['schema']);
+        $show_text   = 'no' !== strtolower((string) $atts['text']);
+
+        $stats = self::aggregateRatingStats();
+        if ($stats['count'] < 1) {
+            return '';
+        }
+
+        $average = $stats['average'];
+        $count   = $stats['count'];
+        $rounded = max(1, min(5, (int) round($average)));
+        $stars   = str_repeat('★', $rounded) . str_repeat('☆', 5 - $rounded);
+
+        /* translators: 1: average rating, 2: best possible rating, 3: number of reviews */
+        $template = _n(
+            '%1$s out of %2$s based on %3$s review',
+            '%1$s out of %2$s based on %3$s reviews',
+            $count,
+            'gratis-reviews'
+        );
+        $summary = sprintf(
+            $template,
+            number_format_i18n($average, 1),
+            '5',
+            number_format_i18n($count)
+        );
+
+        $html = '<div class="gratis-aggregate-rating">';
+        if ($show_text) {
+            // Visible summary conveys the rating; the stars are decorative for AT.
+            $html .= '<span class="gratis-aggregate-rating-stars" style="color:#f59e0b;font-size:1.2em" aria-hidden="true">'
+                . esc_html($stars) . '</span>';
+            $html .= ' <span class="gratis-aggregate-rating-text">' . esc_html($summary) . '</span>';
+        } else {
+            // Stars only: expose the rating to assistive tech via an accessible label.
+            $html .= '<span class="gratis-aggregate-rating-stars" role="img" aria-label="' . esc_attr($summary)
+                . '" style="color:#f59e0b;font-size:1.2em">' . esc_html($stars) . '</span>';
+        }
+        $html .= '</div>';
+
+        if ($show_schema && Settings::schemaEnabled()) {
+            $schema = self::aggregateRatingData();
+            if (null !== $schema) {
+                $html .= '<script type="application/ld+json">'
+                    . wp_json_encode($schema, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                    . '</script>';
+            }
+        }
+
+        return $html;
+    }
+
+    /**
+     * `[gratis-review-form]` — moderated front-end submission form.
+     *
+     * Renders a nonce-protected form posting to admin-post.php. Submissions are
+     * stored as `pending` testimonials (never auto-published). A status flag in
+     * the URL (set by the Post/Redirect/Get handler) drives the notice.
+     *
+     * @param array<string,mixed>|string $atts Shortcode attributes.
+     */
+    public static function reviewFormShortcode($atts): string {
+        $atts  = shortcode_atts(['title' => __('Leave a review', 'gratis-reviews')], $atts);
+        $title = (string) $atts['title'];
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only status flag set by our own PRG redirect.
+        $state  = isset($_GET['gratis_review']) ? sanitize_key(wp_unslash($_GET['gratis_review'])) : '';
+        $notice = '';
+        if ('success' === $state) {
+            $notice = '<div class="gratis-review-notice gratis-review-notice-ok" role="status" '
+                . 'style="border-left:4px solid #16a34a;background:#f0fdf4;color:#166534;padding:.75rem 1rem;border-radius:6px;margin-bottom:1rem">'
+                . esc_html__('Thank you! Your review has been submitted and is awaiting moderation.', 'gratis-reviews')
+                . '</div>';
+        } elseif ('error' === $state) {
+            $notice = '<div class="gratis-review-notice gratis-review-notice-error" role="alert" '
+                . 'style="border-left:4px solid #dc2626;background:#fef2f2;color:#991b1b;padding:.75rem 1rem;border-radius:6px;margin-bottom:1rem">'
+                . esc_html__('Sorry, your review could not be submitted. Please check your entries and try again.', 'gratis-reviews')
+                . '</div>';
+        }
+
+        $field_style = 'width:100%;max-width:420px;padding:.5rem;border:1px solid #ccc;border-radius:6px';
+
+        $html  = '<div class="gratis-review-form">';
+        $html .= $notice;
+        if ('' !== $title) {
+            $html .= '<h3 class="gratis-review-form-title">' . esc_html($title) . '</h3>';
+        }
+
+        $html .= '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="gratis-review-form-form">';
+        $html .= '<input type="hidden" name="action" value="gratis_review_submit">';
+        $html .= wp_nonce_field('gratis_review_submit', 'gratis_review_nonce', true, false);
+
+        $html .= '<p><label for="gratis-review-rating">' . esc_html__('Rating', 'gratis-reviews') . '</label><br>';
+        $html .= '<select id="gratis-review-rating" name="gr_rating" required style="' . esc_attr($field_style) . '">';
+        for ($i = 5; $i >= 1; $i--) {
+            $html .= '<option value="' . absint($i) . '">'
+                . esc_html(str_repeat('★', $i) . ' (' . $i . ')') . '</option>';
+        }
+        $html .= '</select></p>';
+
+        $html .= '<p><label for="gratis-review-name">' . esc_html__('Your name', 'gratis-reviews') . '</label><br>';
+        $html .= '<input type="text" id="gratis-review-name" name="gr_name" required maxlength="100" '
+            . 'autocomplete="name" style="' . esc_attr($field_style) . '"></p>';
+
+        $html .= '<p><label for="gratis-review-content">' . esc_html__('Your review', 'gratis-reviews') . '</label><br>';
+        $html .= '<textarea id="gratis-review-content" name="gr_content" required rows="4" maxlength="2000" '
+            . 'style="' . esc_attr($field_style) . '"></textarea></p>';
+
+        // ponytail: honeypot — bots fill the off-screen field; humans never see it.
+        $html .= '<p style="position:absolute;left:-9999px" aria-hidden="true">';
+        $html .= '<label>' . esc_html__('Leave this field empty', 'gratis-reviews')
+            . '<input type="text" name="gr_website" tabindex="-1" autocomplete="off"></label></p>';
+
+        $html .= '<p><button type="submit" class="gratis-review-form-submit" '
+            . 'style="padding:.6rem 1.2rem;cursor:pointer;border-radius:6px">'
+            . esc_html__('Submit review', 'gratis-reviews') . '</button></p>';
+
+        $html .= '</form></div>';
+
+        return $html;
+    }
+
+    /**
+     * Handle `[gratis-review-form]` submissions (admin-post.php endpoint).
+     *
+     * Verifies the nonce, drops honeypot hits, sanitizes input, and stores the
+     * testimonial as `pending` for moderation. Redirects back via PRG with a
+     * status flag; never echoes output and never auto-publishes.
+     */
+    public static function handleFormSubmission(): void {
+        $nonce = isset($_POST['gratis_review_nonce'])
+            ? sanitize_text_field(wp_unslash($_POST['gratis_review_nonce']))
+            : '';
+        if ('' === $nonce || !wp_verify_nonce($nonce, 'gratis_review_submit')) {
+            self::redirectAfterSubmit('error');
+        }
+
+        // phpcs:disable WordPress.Security.NonceVerification.Missing -- nonce verified above.
+        // Honeypot: a filled trap means a bot. Report success so we don't tip it off.
+        $trap = isset($_POST['gr_website']) ? sanitize_text_field(wp_unslash($_POST['gr_website'])) : '';
+        if ('' !== $trap) {
+            self::redirectAfterSubmit('success');
+        }
+
+        $name    = isset($_POST['gr_name']) ? sanitize_text_field(wp_unslash($_POST['gr_name'])) : '';
+        $content = isset($_POST['gr_content']) ? sanitize_textarea_field(wp_unslash($_POST['gr_content'])) : '';
+        $rating  = isset($_POST['gr_rating']) ? absint(wp_unslash($_POST['gr_rating'])) : 0;
+        // phpcs:enable WordPress.Security.NonceVerification.Missing
+
+        $rating = max(1, min(5, $rating));
+
+        if ('' === $name || '' === $content) {
+            self::redirectAfterSubmit('error');
+        }
+
+        $post_id = wp_insert_post([
+            'post_type'    => self::POST_TYPE,
+            'post_title'   => wp_slash($name),
+            'post_content' => wp_slash($content),
+            'post_status'  => 'pending',
+        ], true);
+
+        if (is_wp_error($post_id)) {
+            self::redirectAfterSubmit('error');
+        }
+
+        update_post_meta($post_id, '_rating', $rating);
+        update_post_meta($post_id, '_author_name', $name);
+
+        self::redirectAfterSubmit('success');
+    }
+
+    /**
+     * Redirect back to the submitting page with a status flag, then exit.
+     *
+     * @param string $status Either `success` or `error`.
+     */
+    private static function redirectAfterSubmit(string $status): void {
+        $back = wp_get_referer();
+        if (!$back) {
+            $back = home_url('/');
+        }
+        wp_safe_redirect(add_query_arg('gratis_review', $status, $back));
+        exit;
+    }
 }

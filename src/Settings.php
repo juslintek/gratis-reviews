@@ -91,6 +91,8 @@ final class Settings {
         echo '<hr><h2>' . esc_html__('Usage', 'gratis-reviews') . '</h2>';
         echo '<p><code>[gratis-rating value="4.5" max="5" label="Excellent"]</code></p>';
         echo '<p><code>[gratis-testimonials count="3" columns="3"]</code></p>';
+        echo '<p><code>[gratis-aggregate-rating]</code> &mdash; ' . esc_html__('site-wide average rating + AggregateRating schema.', 'gratis-reviews') . '</p>';
+        echo '<p><code>[gratis-review-form]</code> &mdash; ' . esc_html__('moderated front-end submission form (saved as pending).', 'gratis-reviews') . '</p>';
         echo '</div>';
     }
 }
