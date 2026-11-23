@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Gratis Reviews
  * Plugin URI: https://github.com/juslintek/gratis-reviews
- * Description: Star ratings + testimonials + Schema.org markup. Replaces WP Review Pro ($67/yr).
+ * Description: Star ratings + testimonials + Schema.org markup.
  * Version: 1.0.0
  * Requires at least: 6.4
  * Requires PHP: 8.1
