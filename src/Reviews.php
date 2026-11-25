@@ -341,7 +341,7 @@ final class Reviews {
         $html .= '<textarea id="gratis-review-content" name="gr_content" required rows="4" maxlength="2000" '
             . 'style="' . esc_attr($field_style) . '"></textarea></p>';
 
-        // ponytail: honeypot — bots fill the off-screen field; humans never see it.
+        // Off-screen honeypot field: bots fill it while human visitors never see it.
         $html .= '<p style="position:absolute;left:-9999px" aria-hidden="true">';
         $html .= '<label>' . esc_html__('Leave this field empty', 'gratis-reviews')
             . '<input type="text" name="gr_website" tabindex="-1" autocomplete="off"></label></p>';
